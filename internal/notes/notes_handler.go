@@ -35,7 +35,7 @@ func (h *Handler) CreateNote(c *gin.Context) {
 		UpdatedAt: now,
 	}
 
-	createdNote, err := h.repo.Create(c, note)
+	createdNote, err := h.repo.Create(c.Request.Context(), note)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create note"})
 		return

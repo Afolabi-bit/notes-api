@@ -14,16 +14,16 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	// godotenv.Load() reads the env file and loads the variables into the process environment
+	//os.Getenv("ENV_NAME") reads the env variable
+
 	if err := godotenv.Load(); err != nil {
 		return Config{}, fmt.Errorf("error loading .env: %w", err)
 	}
 
-	mongoURI := os.Getenv("MONGO_URI")
-	if mongoURI == "" {
-		mongoURI = os.Getenv("MONGODB_URI")
-	}
-	if mongoURI == "" {
-		return Config{}, fmt.Errorf("environment variable MONGO_URI or MONGODB_URI is not set")
+	mongoURI, err := extractEnv("MONGO_URI")
+	if err != nil {
+		return Config{}, err
 	}
 
 	mongoDB, err := extractEnv("MONGO_DB_NAME")

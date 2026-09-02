@@ -14,7 +14,7 @@ func main() {
 		log.Fatalf("Error loading config: %v", err)
 	}
 
-	client, _, err := db.Connect(cfg)
+	client, database, err := db.Connect(cfg)
 
 	if err != nil {
 		log.Fatalf("Error connecting to MongoDB: %v", err)
@@ -26,7 +26,7 @@ func main() {
 		}
 	}()
 
-	router := server.NewRouter()
+	router := server.NewRouter(database)
 
 	addr := fmt.Sprintf(":%s", cfg.ServerPort)
 

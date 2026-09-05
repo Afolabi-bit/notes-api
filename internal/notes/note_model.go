@@ -25,3 +25,23 @@ type UpdateNoteRequest struct {
 	Content string `json:"content" binding:"required"`
 	Pinned  bool   `json:"pinned"`
 }
+
+type PaginationMeta struct {
+	Limit      int64  `json:"limit"`
+	NextCursor string `json:"nextCursor"`
+	HasMore    bool   `json:"hasMore"`
+	PageLength int64  `json:"pageLength"`
+}
+
+//	type PaginatedResponse struct {
+//		Status     string         `json:"status"`
+//		Pagination PaginationMeta `json:"pagination"`
+//		Data       []Note         `json:"data"`
+//	}
+
+type APIResponse[T any] struct {
+	Status     string          `json:"status"`
+	Message    string          `json:"message,omitempty"`
+	Pagination *PaginationMeta `json:"pagination,omitempty"`
+	Data       T               `json:"data,omitempty"`
+}

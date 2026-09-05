@@ -44,15 +44,18 @@ func (h *Handler) CreateNote(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, createdNote)
+	response := APIResponse[Note]{
+		Status:  "success",
+		Message: "Note created successfully",
+		Data:    createdNote,
+	}
+
+	c.JSON(http.StatusCreated, response)
 
 }
 
 func (h *Handler) ListNotes(c *gin.Context) {
-	lastID := c.Query("lastID")
-	if lastID == "" {
-		lastID = c.Query("last_id")
-	}
+	lastID := c.Query("nextCursor")
 
 	limitStr := c.DefaultQuery("limit", "10")
 	limit, err := strconv.ParseInt(limitStr, 10, 64)
@@ -61,12 +64,35 @@ func (h *Handler) ListNotes(c *gin.Context) {
 		return
 	}
 
-	notes, err := h.repo.List(c.Request.Context(), lastID, limit)
+	notes, err := h.repo.List(c.Request.Context(), lastID, limit+1)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list notes"})
 		return
 	}
-	c.JSON(http.StatusOK, notes)
+
+	hasMore := len(notes) > int(limit)
+	if hasMore {
+		notes = notes[:limit]
+	}
+
+	nextCursor := ""
+	if hasMore && len(notes) > 0 {
+		nextCursor = notes[len(notes)-1].ID.Hex()
+	}
+
+	response := APIResponse[[]Note]{
+		Status:  "success",
+		Message: "Notes retrieved successfully",
+		Pagination: &PaginationMeta{
+			Limit:      limit,
+			NextCursor: nextCursor,
+			HasMore:    hasMore,
+			PageLength: int64(len(notes)),
+		},
+		Data: notes,
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) GetNoteByID(c *gin.Context) {
@@ -91,7 +117,14 @@ func (h *Handler) GetNoteByID(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get note"})
 		return
 	}
-	c.JSON(http.StatusOK, note)
+
+	response := APIResponse[Note]{
+		Status:  "success",
+		Message: "Note retrieved successfully",
+		Data:    note,
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) UpdateNoteByID(c *gin.Context) {
@@ -122,7 +155,14 @@ func (h *Handler) UpdateNoteByID(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update note"})
 		return
 	}
-	c.JSON(http.StatusOK, updatedNote)
+
+	response := APIResponse[Note]{
+		Status:  "success",
+		Message: "Note updated successfully",
+		Data:    updatedNote,
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DeleteNoteByID(c *gin.Context) {
@@ -152,5 +192,10 @@ func (h *Handler) DeleteNoteByID(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Note not found for that ID"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Note deleted successfully"})
+	response := APIResponse[any]{
+		Status:  "success",
+		Message: "Note deleted successfully",
+	}
+
+	c.JSON(http.StatusOK, response)
 }

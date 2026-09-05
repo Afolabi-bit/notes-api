@@ -36,14 +36,27 @@ func (r *Repo) Create(ctx context.Context, note Note) (Note, error) {
 
 }
 
-func (r *Repo) List(ctx context.Context) ([]Note, error) {
+func (r *Repo) List(ctx context.Context, lastID string, limit int64) ([]Note, error) {
+
+	filter := bson.D{} //match all docs
+
+	if lastID != "" {
+		objID, err := bson.ObjectIDFromHex(lastID)
+		if err != nil {
+			return nil, fmt.Errorf("Failed to parse lastID: %w", err)
+		}
+
+		filter = bson.D{{Key: "_id", Value: bson.D{{Key: "$gt", Value: objID}}}}
+	}
+
+	findOptions := options.Find()
+	findOptions.SetLimit(limit)
+	findOptions.SetSort(bson.D{{Key: "_id", Value: 1}})
 
 	opCtx, cancel := context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
 
-	filter := bson.M{} //match all docs
-
-	cursor, err := r.coll.Find(opCtx, filter)
+	cursor, err := r.coll.Find(opCtx, filter, findOptions)
 
 	if err != nil {
 		return nil, fmt.Errorf("Failed to find notes: %w", err)

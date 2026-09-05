@@ -3,6 +3,7 @@ package notes
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -48,7 +49,19 @@ func (h *Handler) CreateNote(c *gin.Context) {
 }
 
 func (h *Handler) ListNotes(c *gin.Context) {
-	notes, err := h.repo.List(c.Request.Context())
+	lastID := c.Query("lastID")
+	if lastID == "" {
+		lastID = c.Query("last_id")
+	}
+
+	limitStr := c.DefaultQuery("limit", "10")
+	limit, err := strconv.ParseInt(limitStr, 10, 64)
+	if err != nil || limit <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Query parameter 'limit' must be a positive integer"})
+		return
+	}
+
+	notes, err := h.repo.List(c.Request.Context(), lastID, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list notes"})
 		return

@@ -35,21 +35,24 @@ In Go, simplicity, testability, and modularity take precedence over heavy, opini
 │                    Gin Router & Engine                      │
 │                 (internal/server/router.go)                 │
 └──────────────────────────────┬──────────────────────────────┘
-                               │ Route Dispatch (/notes)
+                               │ Route Dispatch (POST, GET, PUT, DELETE /notes)
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    HTTP Handler Layer                       │
 │               (internal/notes/notes_handler.go)             │
-│   • Request Validation (c.ShouldBindJSON)                   │
-│   • DTO to Domain Model Mapping                             │
-│   • ID Generation (BSON ObjectID) & UTC Timestamps          │
+│   • Request Body Binding & Validation (c.ShouldBindJSON)    │
+│   • Path Parameter Parsing & Hex ID Parsing (c.Param)       │
+│   • DTO Mapping, BSON ObjectID Generation & UTC Timestamps  │
+│   • Error Classification (mongo.ErrNoDocuments -> 404)      │
 └──────────────────────────────┬──────────────────────────────┘
-                               │ Context & Domain Entity
+                               │ Context, Filter & Domain Entity
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                 Repository / Data Access Layer              │
 │                (internal/notes/notes_repo.go)               │
-│   • Query Execution (InsertOne)                             │
+│   • Queries: InsertOne, Find, FindOne,                      │
+│     FindOneAndUpdate, FindOneAndDelete                      │
+│   • Cursor Management & Safe Stream Draining (defer Close)  │
 │   • Operation Timeout Bounds (5s Context)                   │
 └──────────────────────────────┬──────────────────────────────┘
                                │ Wire Protocol (v2 Driver)
@@ -61,10 +64,10 @@ In Go, simplicity, testability, and modularity take precedence over heavy, opini
 
 ### Core Design Principles:
 1. **Layered Separation of Concerns**:
-   - **Routes**: Map paths and HTTP verbs to handler methods.
-   - **Handlers (Controllers)**: Parse HTTP requests, validate input bodies, orchestrate business workflows, and format HTTP responses.
-   - **Repositories (Data Access)**: Isolate raw MongoDB driver operations and collection queries behind clean Go methods.
-   - **Models**: Pure data definitions carrying BSON (persistence) and JSON (transport) struct tags.
+   - **Routes**: Map RESTful HTTP verbs (`POST`, `GET`, `PUT`, `DELETE`) and path parameters (`/:id`) to handler methods.
+   - **Handlers (Controllers)**: Parse HTTP requests, validate input bodies (DTOs), validate path parameters, orchestrate business workflows, handle `mongo.ErrNoDocuments` with HTTP 404 responses, and format HTTP responses.
+   - **Repositories (Data Access)**: Isolate raw MongoDB driver operations (`InsertOne`, `Find`, `FindOne`, `FindOneAndUpdate`, `FindOneAndDelete`) behind clean Go methods with scoped 5-second timeouts.
+   - **Models**: Pure data definitions carrying BSON (persistence) and JSON (transport) struct tags, along with validation DTOs (`CreateNoteRequest`, `UpdateNoteRequest`).
 2. **Explicit Dependency Injection**:
    Database handles (`*mongo.Database`) and repository instances (`*Repo`) are passed down explicitly through constructors (`NewRouter`, `NewRepo`, `NewHandler`) rather than stored in global state.
 3. **Fail-Fast Initialization**:
@@ -87,10 +90,10 @@ In Go, simplicity, testability, and modularity take precedence over heavy, opini
 │   ├── db/
 │   │   └── mongo.go                # MongoDB Driver v2 connection & lifecycle management
 │   ├── notes/                      # Notes domain module
-│   │   ├── note_model.go           # Domain structs (Note) & DTOs (CreateNoteRequest)
-│   │   ├── notes_repo.go           # MongoDB collection operations (InsertOne, etc.)
-│   │   ├── notes_handler.go        # HTTP handlers (validation, response formatting)
-│   │   └── notes_routes.go         # Route grouping (/notes) and handler binding
+│   │   ├── note_model.go           # Domain structs (Note) & DTOs (CreateNoteRequest, UpdateNoteRequest)
+│   │   ├── notes_repo.go           # MongoDB collection operations (Create, List, GetByID, UpdateByID, DeleteByID)
+│   │   ├── notes_handler.go        # HTTP handlers (CRUD request validation, ObjectID parsing, response formatting)
+│   │   └── notes_routes.go         # Route grouping (/notes) and full RESTful CRUD routing
 │   └── server/
 │       └── router.go               # Gin HTTP engine setup, middleware, and health check
 ├── tmp/                            # Temporary directory for Air build artifacts
@@ -100,6 +103,7 @@ In Go, simplicity, testability, and modularity take precedence over heavy, opini
 ├── .gitignore                      # Git ignore patterns
 ├── go.mod                          # Module definition and dependency version tracking
 ├── go.sum                          # Cryptographic checksums of third-party dependencies
+├── NEXT_STEPS.md                   # Practice roadmap and expansion guide
 └── PROJECT_SETUP_GUIDE.md          # Comprehensive architecture and implementation guide
 ```
 
@@ -336,18 +340,26 @@ type Note struct {
 type CreateNoteRequest struct {
 	Title   string `json:"title" binding:"required"`
 	Content string `json:"content" binding:"required"`
-	Pinned  bool   `json:"pinned" binding:"required"`
+	Pinned  bool   `json:"pinned"`
+}
+
+type UpdateNoteRequest struct {
+	Title   string `json:"title" binding:"required"`
+	Content string `json:"content" binding:"required"`
+	Pinned  bool   `json:"pinned"`
 }
 ```
 
 ### Key Technical Details:
 - **`Note` (Domain Entity)**:
   - `ID`: Represented as `bson.ObjectID`, mapped to MongoDB's primary key `_id` and exported as `"id"` in JSON.
-  - Dual Struct Tags (`json` and `bson`): Provides strict camelCase JSON serialization for client clients while adhering to BSON document field standards.
+  - **Dual Struct Tags (`json` and `bson`)**: Provides strict camelCase JSON serialization for client consumers while adhering to BSON document field standards.
   - `CreatedAt` & `UpdatedAt`: Standardized `time.Time` fields for auditing and chronological sorting.
-- **`CreateNoteRequest` (Data Transfer Object)**:
+- **`CreateNoteRequest` & `UpdateNoteRequest` (Data Transfer Objects)**:
   - Decouples client payloads from internal database structures (clients cannot tamper with `_id`, `createdAt`, or `updatedAt`).
-  - Gin Validation Tags: `binding:"required"` enforces that `title`, `content`, and `pinned` must be provided in the incoming JSON body; otherwise, Gin automatically flags a validation error.
+  - **Gin Validation Tags**: `binding:"required"` enforces that `title` and `content` must be provided in the incoming JSON body; otherwise, Gin automatically flags a validation error.
+  - **Boolean `Pinned` without `binding:"required"`**: In Gin's default validator (`go-playground/validator`), the `required` tag rejects zero values of types. Because `false` is the Go boolean zero value, having `binding:"required"` would erroneously reject requests where `"pinned": false`. Omitting `binding:"required"` allows clients to send either `true` or `false` (defaulting cleanly to `false` if omitted).
+- **Domain Decoupling**: Having distinct DTO structs allows the API to evolve request requirements for creating vs updating notes independently without breaking the underlying persistence model.
 
 ---
 
@@ -359,14 +371,16 @@ The repository layer abstracts all database collection queries from the web tran
 ```go
 package notes
 
-// Repo -data access layer
+// Repo -data acces layer
 
 import (
 	"context"
 	"fmt"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 type Repo struct {
@@ -390,13 +404,112 @@ func (r *Repo) Create(ctx context.Context, note Note) (Note, error) {
 		return Note{}, fmt.Errorf("Failed to save note to database: %w", err)
 	}
 	return note, nil
+
+}
+
+func (r *Repo) List(ctx context.Context) ([]Note, error) {
+
+	opCtx, cancel := context.WithTimeout(ctx, time.Second*5)
+	defer cancel()
+
+	filter := bson.M{} //match all docs
+
+	cursor, err := r.coll.Find(opCtx, filter)
+
+	if err != nil {
+		return nil, fmt.Errorf("Failed to find notes: %w", err)
+	}
+
+	// cursor must be closed to avoid memory leaks
+	defer cursor.Close(opCtx)
+
+	var notes []Note
+
+	if err := cursor.All(opCtx, &notes); err != nil {
+		return nil, fmt.Errorf("Failed to decode notes: %w", err)
+	}
+
+	return notes, nil
+}
+
+func (r *Repo) GetByID(ctx context.Context, id bson.ObjectID) (Note, error) {
+
+	opCtx, cancel := context.WithTimeout(ctx, time.Second*5)
+	defer cancel()
+
+	filter := bson.M{"_id": id}
+	var note Note
+
+	err := r.coll.FindOne(opCtx, filter, options.FindOne()).Decode(&note)
+
+	if err != nil {
+		return Note{}, fmt.Errorf("Failed to find note: %w", err)
+	}
+
+	return note, nil
+}
+
+func (r *Repo) UpdateByID(ctx context.Context, id bson.ObjectID, req UpdateNoteRequest) (Note, error) {
+
+	opCtx, cancel := context.WithTimeout(ctx, time.Second*5)
+	defer cancel()
+
+	filter := bson.M{"_id": id}
+	update := bson.M{
+		"$set": bson.M{
+			"title":     req.Title,
+			"content":   req.Content,
+			"pinned":    req.Pinned,
+			"updatedAt": time.Now().UTC(),
+		},
+	}
+
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+
+	var updatedNote Note
+	err := r.coll.FindOneAndUpdate(opCtx, filter, update, opts).Decode(&updatedNote)
+	if err != nil {
+		return Note{}, fmt.Errorf("Failed to update note: %w", err)
+	}
+
+	return updatedNote, nil
+}
+
+func (r *Repo) DeleteByID(ctx context.Context, id bson.ObjectID) (bool, error) {
+
+	opCtx, cancel := context.WithTimeout(ctx, time.Second*5)
+	defer cancel()
+
+	filter := bson.M{"_id": id}
+	var deletedNote Note
+
+	err := r.coll.FindOneAndDelete(opCtx, filter, options.FindOneAndDelete()).Decode(&deletedNote)
+	if err != nil {
+		return false, fmt.Errorf("Failed to delete note: %w", err)
+	}
+
+	return true, nil
 }
 ```
 
 ### Key Technical Details:
 - **Encapsulated Collection**: `Repo` holds an unexported `coll *mongo.Collection` pointer initialized to the `"notes"` collection.
-- **Bounded Execution Time**: `opCtx, cancel := context.WithTimeout(ctx, time.Second*5)` derives a scoped context that guarantees write operations fail after 5 seconds if MongoDB becomes unresponsive.
-- **Error Wrapping**: Returns an error wrapped with `%w` for upstream debugging while preserving error chains.
+- **Bounded Execution Time**: Every repository method derives a scoped context `opCtx, cancel := context.WithTimeout(ctx, time.Second*5)`. This ensures that if network latency spikes or a cluster partition occurs, operations fail gracefully within 5 seconds rather than hanging requests indefinitely.
+- **`Create`**: Executes `r.coll.InsertOne(opCtx, note)`. Since `note.ID` was pre-generated by the caller, the full document can be persisted directly.
+- **`List` & Cursor Lifecycle**:
+  - `r.coll.Find(opCtx, bson.M{})`: Returns a MongoDB `*mongo.Cursor` that streams matching documents from the cluster.
+  - **`defer cursor.Close(opCtx)`**: It is critical to defer cursor closure immediately. An unclosed cursor consumes server-side socket resources and causes goroutine memory leaks on the client.
+  - `cursor.All(opCtx, &notes)`: Modern MongoDB v2 driver helper that reads and unmarshals all cursor documents directly into a slice of `Note`.
+- **`GetByID`**:
+  - Evaluates `filter := bson.M{"_id": id}` against the collection using `r.coll.FindOne(opCtx, filter)`.
+  - Calling `.Decode(&note)` deserializes the matching BSON document. If no document matches, MongoDB driver returns `mongo.ErrNoDocuments`.
+- **`UpdateByID` & Atomic Document Modification**:
+  - Constructs an atomic update document using the `$set` operator. This prevents full-document replacement and only modifies `title`, `content`, `pinned`, and `updatedAt`.
+  - Always generates a fresh UTC timestamp (`time.Now().UTC()`) on every modification.
+  - **`SetReturnDocument(options.After)`**: By default, `FindOneAndUpdate` returns the document *before* updates were applied. Specifying `options.After` instructs MongoDB to return the modified document post-update, allowing the API to immediately return the latest state to the caller without a second database roundtrip.
+- **`DeleteByID`**:
+  - Uses `FindOneAndDelete` with `bson.M{"_id": id}` to find and remove the document in a single atomic network operation.
+  - Returns `true, nil` on successful deletion. If the document did not exist, `FindOneAndDelete().Decode()` returns `mongo.ErrNoDocuments`.
 
 ---
 
@@ -409,11 +522,13 @@ The handler layer handles HTTP serialization, schema validation, domain entity g
 package notes
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 type Handler struct {
@@ -450,19 +565,124 @@ func (h *Handler) CreateNote(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, createdNote)
+
+}
+
+func (h *Handler) ListNotes(c *gin.Context) {
+	notes, err := h.repo.List(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list notes"})
+		return
+	}
+	c.JSON(http.StatusOK, notes)
+}
+
+func (h *Handler) GetNoteByID(c *gin.Context) {
+	idStr := c.Param("id")
+	if idStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Note ID is required"})
+		return
+	}
+
+	id, err := bson.ObjectIDFromHex(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid note ID"})
+		return
+	}
+
+	note, err := h.repo.GetByID(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Note not found for that ID"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get note"})
+		return
+	}
+	c.JSON(http.StatusOK, note)
+}
+
+func (h *Handler) UpdateNoteByID(c *gin.Context) {
+	idStr := c.Param("id")
+	if idStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Note ID is required"})
+		return
+	}
+
+	id, err := bson.ObjectIDFromHex(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid note ID"})
+		return
+	}
+
+	var req UpdateNoteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	updatedNote, err := h.repo.UpdateByID(c.Request.Context(), id, req)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Note not found for that ID"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update note"})
+		return
+	}
+	c.JSON(http.StatusOK, updatedNote)
+}
+
+func (h *Handler) DeleteNoteByID(c *gin.Context) {
+	idStr := c.Param("id")
+	if idStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Note ID is required"})
+		return
+	}
+
+	id, err := bson.ObjectIDFromHex(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid note ID"})
+		return
+	}
+
+	deletedNote, err := h.repo.DeleteByID(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Note not found for that ID"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete note"})
+		return
+	}
+
+	if !deletedNote {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Note not found for that ID"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Note deleted successfully"})
 }
 ```
 
 ### Key Technical Details:
 1. **Request Validation (`c.ShouldBindJSON`)**:
-   Reads the HTTP request body and deserializes it into `CreateNoteRequest`. If required fields are missing or JSON is malformed, it halts and responds with HTTP `400 Bad Request`.
+   Reads the HTTP request body and deserializes it into `CreateNoteRequest` or `UpdateNoteRequest`. If required fields (`title`, `content`) are missing or JSON is malformed, it halts and responds with HTTP `400 Bad Request`.
 2. **Domain Hydration**:
-   - `bson.NewObjectID()`: Generates a unique 12-byte BSON ObjectId on the server side.
-   - `time.Now().UTC()`: Ensures all database timestamps are persisted in coordinated universal time (UTC) without server timezone drift.
-3. **Context Propagation (`c.Request.Context()`)**:
-   Passes the incoming HTTP request context to `h.repo.Create()`. If the HTTP client disconnects or cancels the request mid-flight, the database driver is notified to cancel the downstream query.
-4. **Status Code Semantics**:
-   Returns `201 Created` with the full note JSON on success, `400 Bad Request` on invalid payloads, and `500 Internal Server Error` on database failure.
+   - `bson.NewObjectID()`: Generates a unique 12-byte BSON ObjectId on the server side during note creation.
+   - `time.Now().UTC()`: Ensures all database timestamps (`createdAt`, `updatedAt`) are stored in Coordinated Universal Time (UTC) without server timezone drift.
+3. **Path Parameter Parsing & Hex ID Validation**:
+   - `c.Param("id")`: Extracts the route variable from the URI segment.
+   - `bson.ObjectIDFromHex(idStr)`: Parses the 24-character hexadecimal string into a typed BSON `ObjectID`. If an invalid hex string is provided (e.g., `invalid-id`), it immediately returns HTTP `400 Bad Request` without hitting MongoDB.
+4. **Targeted Error Handling with `errors.Is(err, mongo.ErrNoDocuments)`**:
+   Differentiates between database connection errors and document absence. When a query returns no matching document, the MongoDB driver returns `mongo.ErrNoDocuments`. The handler detects this using `errors.Is` and responds with HTTP `404 Not Found` (`{"error": "Note not found for that ID"}`), reserving HTTP `500 Internal Server Error` for genuine infrastructure failures.
+5. **Context Propagation (`c.Request.Context()`)**:
+   Passes the incoming HTTP request context to every repository call. If the HTTP client aborts or disconnects mid-flight, the database driver is notified immediately to cancel the downstream query.
+6. **RESTful HTTP Status Codes**:
+   - `201 Created`: Note successfully created (`POST`).
+   - `200 OK`: Note successfully retrieved (`GET`), updated (`PUT`), or deleted (`DELETE`).
+   - `400 Bad Request`: Payload validation failure or invalid ObjectID format.
+   - `404 Not Found`: Target note not found for that ID.
+   - `500 Internal Server Error`: Unexpected database execution failure.
 
 ---
 
@@ -486,13 +706,23 @@ func RegisterRoutes(r *gin.Engine, db *mongo.Database) {
 	notesGroup := r.Group("/notes")
 
 	notesGroup.POST("", handler.CreateNote)
+	notesGroup.GET("", handler.ListNotes)
+	notesGroup.GET("/:id", handler.GetNoteByID)
+	notesGroup.PUT("/:id", handler.UpdateNoteByID)
+	notesGroup.DELETE("/:id", handler.DeleteNoteByID)
 }
 ```
 
 ### Key Technical Details:
 - **Domain Dependency Injection**: Instantiates `NewRepo(db)` and injects it into `NewHandler(repo)`.
 - **Scoped Route Group (`r.Group("/notes")`)**: Isolates all notes-related endpoints under the `/notes` prefix, making it easy to attach domain-specific middleware (such as auth or rate limiting) in the future.
-- **RESTful Mapping**: Maps `POST /notes` to `handler.CreateNote`.
+- **RESTful Endpoint Hierarchy**:
+  - `POST   /notes`: Create a new note.
+  - `GET    /notes`: Retrieve all notes.
+  - `GET    /notes/:id`: Retrieve a specific note by ID.
+  - `PUT    /notes/:id`: Update an existing note by ID.
+  - `DELETE /notes/:id`: Remove a note by ID.
+- **Dynamic Wildcards (`/:id`)**: Gin binds the dynamic path segment, accessible within handlers using `c.Param("id")`.
 
 ---
 
@@ -692,5 +922,173 @@ curl -X POST http://localhost:8080/notes \
 ```json
 {
   "error": "Key: 'CreateNoteRequest.Title' Error:Field validation for 'Title' failed on the 'required' tag"
+}
+```
+
+---
+
+### 5. List All Notes
+Fetch all notes stored in the collection:
+```bash
+curl -X GET http://localhost:8080/notes
+```
+
+**Expected Response (`200 OK`)**:
+```json
+[
+  {
+    "id": "66b1e7c9f5d1a23b8e4c10a1",
+    "title": "Study Go Concurrency",
+    "content": "Deep dive into goroutines, channels, and sync.WaitGroup",
+    "pinned": true,
+    "createdAt": "2026-09-02T19:42:00.123456789Z",
+    "updatedAt": "2026-09-02T19:42:00.123456789Z"
+  }
+]
+```
+
+---
+
+### 6. Get a Specific Note by ID
+Fetch a single note by providing its 24-character hexadecimal BSON ObjectId:
+```bash
+curl -X GET http://localhost:8080/notes/66b1e7c9f5d1a23b8e4c10a1
+```
+
+**Expected Response (`200 OK`)**:
+```json
+{
+  "id": "66b1e7c9f5d1a23b8e4c10a1",
+  "title": "Study Go Concurrency",
+  "content": "Deep dive into goroutines, channels, and sync.WaitGroup",
+  "pinned": true,
+  "createdAt": "2026-09-02T19:42:00.123456789Z",
+  "updatedAt": "2026-09-02T19:42:00.123456789Z"
+}
+```
+
+---
+
+### 7. Get Note by ID (Malformed Hex Format)
+Send an ID string that is not a valid 24-character hexadecimal ObjectId:
+```bash
+curl -X GET http://localhost:8080/notes/invalid-id-123
+```
+
+**Expected Response (`400 Bad Request`)**:
+```json
+{
+  "error": "Invalid note ID"
+}
+```
+
+---
+
+### 8. Get Note by ID (Non-Existent Note)
+Query a valid 24-character hex ID that does not exist in the database:
+```bash
+curl -X GET http://localhost:8080/notes/000000000000000000000000
+```
+
+**Expected Response (`404 Not Found`)**:
+```json
+{
+  "error": "Note not found for that ID"
+}
+```
+
+---
+
+### 9. Update a Note by ID
+Update the title, content, or pinned status of an existing note:
+```bash
+curl -X PUT http://localhost:8080/notes/66b1e7c9f5d1a23b8e4c10a1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Mastering Go Concurrency & Channels",
+    "content": "Deep dive into goroutines, select statements, worker pools, and context cancellation",
+    "pinned": false
+  }'
+```
+
+**Expected Response (`200 OK`)**:
+```json
+{
+  "id": "66b1e7c9f5d1a23b8e4c10a1",
+  "title": "Mastering Go Concurrency & Channels",
+  "content": "Deep dive into goroutines, select statements, worker pools, and context cancellation",
+  "pinned": false,
+  "createdAt": "2026-09-02T19:42:00.123456789Z",
+  "updatedAt": "2026-09-02T20:15:30.987654321Z"
+}
+```
+
+---
+
+### 10. Update a Note by ID (Validation Error)
+Send an update request missing the required `content` field:
+```bash
+curl -X PUT http://localhost:8080/notes/66b1e7c9f5d1a23b8e4c10a1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Updated Title Only"
+  }'
+```
+
+**Expected Response (`400 Bad Request`)**:
+```json
+{
+  "error": "Key: 'UpdateNoteRequest.Content' Error:Field validation for 'Content' failed on the 'required' tag"
+}
+```
+
+---
+
+### 11. Update a Note by ID (Non-Existent Note)
+Attempt to update a non-existent note:
+```bash
+curl -X PUT http://localhost:8080/notes/000000000000000000000000 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Ghost Note",
+    "content": "This note does not exist in the collection",
+    "pinned": false
+  }'
+```
+
+**Expected Response (`404 Not Found`)**:
+```json
+{
+  "error": "Note not found for that ID"
+}
+```
+
+---
+
+### 12. Delete a Note by ID
+Remove an existing note by its ObjectId:
+```bash
+curl -X DELETE http://localhost:8080/notes/66b1e7c9f5d1a23b8e4c10a1
+```
+
+**Expected Response (`200 OK`)**:
+```json
+{
+  "message": "Note deleted successfully"
+}
+```
+
+---
+
+### 13. Delete a Note by ID (Non-Existent Note)
+Attempt to delete a note that has already been deleted or never existed:
+```bash
+curl -X DELETE http://localhost:8080/notes/000000000000000000000000
+```
+
+**Expected Response (`404 Not Found`)**:
+```json
+{
+  "error": "Note not found for that ID"
 }
 ```

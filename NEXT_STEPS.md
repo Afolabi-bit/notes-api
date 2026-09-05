@@ -29,7 +29,7 @@ Currently, `r.coll.Find(opCtx, filter)` returns all documents into memory. In pr
     findOpts := options.Find().
         SetSkip(int64((page - 1) * limit)).
         SetLimit(int64(limit)).
-        SetSort(bson.D{{"createdAt", -1}})
+        SetSort(bson.D{{Key: "createdAt", Value: -1}})
     ```
   - Dynamic BSON query construction:
     ```go

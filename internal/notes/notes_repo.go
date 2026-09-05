@@ -108,19 +108,30 @@ func (r *Repo) UpdateByID(ctx context.Context, id bson.ObjectID, req UpdateNoteR
 	defer cancel()
 
 	filter := bson.M{"_id": id}
-	update := bson.M{
-		"$set": bson.M{
-			"title":     req.Title,
-			"content":   req.Content,
-			"pinned":    req.Pinned,
-			"updatedAt": time.Now().UTC(),
-		},
+
+	fields := bson.M{
+		"updatedAt": time.Now().UTC(),
+	}
+	if req.Title != nil {
+		fields["title"] = *req.Title
+	}
+
+	if req.Content != nil {
+		fields["content"] = *req.Content
+	}
+
+	if req.Pinned != nil {
+		fields["pinned"] = *req.Pinned
+	}
+
+	updateFields := bson.M{
+		"$set": fields,
 	}
 
 	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
 
 	var updatedNote Note
-	err := r.coll.FindOneAndUpdate(opCtx, filter, update, opts).Decode(&updatedNote)
+	err := r.coll.FindOneAndUpdate(opCtx, filter, updateFields, opts).Decode(&updatedNote)
 	if err != nil {
 		return Note{}, fmt.Errorf("Failed to update note: %w", err)
 	}

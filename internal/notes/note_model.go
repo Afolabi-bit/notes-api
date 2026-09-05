@@ -21,9 +21,9 @@ type CreateNoteRequest struct {
 	Pinned  bool   `json:"pinned"`
 }
 type UpdateNoteRequest struct {
-	Title   string `json:"title" binding:"required"`
-	Content string `json:"content" binding:"required"`
-	Pinned  bool   `json:"pinned"`
+	Title   *string `json:"title,omitempty"`
+	Content *string `json:"content,omitempty"`
+	Pinned  *bool   `json:"pinned,omitempty"`
 }
 
 type NoteFilter struct {

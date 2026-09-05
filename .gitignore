@@ -24,3 +24,4 @@
 # Local documentation / setup guide
 *.exe
 api.exe
+.env*

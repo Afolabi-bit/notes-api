@@ -36,17 +36,25 @@ func (r *Repo) Create(ctx context.Context, note Note) (Note, error) {
 
 }
 
-func (r *Repo) List(ctx context.Context, lastID string, limit int64) ([]Note, error) {
+func (r *Repo) List(ctx context.Context, nextCursor string, limit int64, filter NoteFilter) ([]Note, error) {
 
-	filter := bson.D{} //match all docs
+	query := bson.M{}
 
-	if lastID != "" {
-		objID, err := bson.ObjectIDFromHex(lastID)
+	if nextCursor != "" {
+		objID, err := bson.ObjectIDFromHex(nextCursor)
 		if err != nil {
-			return nil, fmt.Errorf("Failed to parse lastID: %w", err)
+			return nil, fmt.Errorf("Failed to parse nextCursor: %w", err)
 		}
 
-		filter = bson.D{{Key: "_id", Value: bson.D{{Key: "$gt", Value: objID}}}}
+		query["_id"] = bson.M{"$gt": objID}
+	}
+
+	if filter.Pinned != nil {
+		query["pinned"] = *filter.Pinned
+	}
+
+	if filter.Search != "" {
+		query["title"] = bson.M{"$regex": filter.Search, "$options": "i"}
 	}
 
 	findOptions := options.Find()
@@ -56,8 +64,7 @@ func (r *Repo) List(ctx context.Context, lastID string, limit int64) ([]Note, er
 	opCtx, cancel := context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
 
-	cursor, err := r.coll.Find(opCtx, filter, findOptions)
-
+	cursor, err := r.coll.Find(opCtx, query, findOptions)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to find notes: %w", err)
 	}
@@ -69,6 +76,10 @@ func (r *Repo) List(ctx context.Context, lastID string, limit int64) ([]Note, er
 
 	if err := cursor.All(opCtx, &notes); err != nil {
 		return nil, fmt.Errorf("Failed to decode notes: %w", err)
+	}
+
+	if notes == nil {
+		notes = []Note{}
 	}
 
 	return notes, nil

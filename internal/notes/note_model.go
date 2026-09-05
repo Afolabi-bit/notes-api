@@ -26,6 +26,11 @@ type UpdateNoteRequest struct {
 	Pinned  bool   `json:"pinned"`
 }
 
+type NoteFilter struct {
+	Pinned *bool  `json:"pinned,omitempty"`
+	Search string `json:"search,omitempty"`
+}
+
 type PaginationMeta struct {
 	Limit      int64  `json:"limit"`
 	NextCursor string `json:"nextCursor"`

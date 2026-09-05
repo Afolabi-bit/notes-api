@@ -55,7 +55,7 @@ func (h *Handler) CreateNote(c *gin.Context) {
 }
 
 func (h *Handler) ListNotes(c *gin.Context) {
-	lastID := c.Query("nextCursor")
+	nextCursor := c.Query("nextCursor")
 
 	limitStr := c.DefaultQuery("limit", "10")
 	limit, err := strconv.ParseInt(limitStr, 10, 64)
@@ -64,7 +64,27 @@ func (h *Handler) ListNotes(c *gin.Context) {
 		return
 	}
 
-	notes, err := h.repo.List(c.Request.Context(), lastID, limit+1)
+	var filter NoteFilter
+
+	pinnedStr := c.Query("pinned")
+	if pinnedStr != "" {
+		pinned, err := strconv.ParseBool(pinnedStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Query parameter 'pinned' must be a boolean ('true' or 'false')"})
+			return
+		}
+		filter.Pinned = &pinned
+	}
+
+	search := c.Query("search")
+	if search == "" {
+		search = c.Query("q")
+	}
+	if search != "" {
+		filter.Search = search
+	}
+
+	notes, err := h.repo.List(c.Request.Context(), nextCursor, limit+1, filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list notes"})
 		return
@@ -75,7 +95,7 @@ func (h *Handler) ListNotes(c *gin.Context) {
 		notes = notes[:limit]
 	}
 
-	nextCursor := ""
+	nextCursor = ""
 	if hasMore && len(notes) > 0 {
 		nextCursor = notes[len(notes)-1].ID.Hex()
 	}
